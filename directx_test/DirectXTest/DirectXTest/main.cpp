@@ -31,11 +31,17 @@ ID3D12Fence* fence = nullptr;
 UINT64 fenceValue = 0;
 
 ID3D12Resource* vertexBuffer = nullptr;
+ID3D12Resource* indexBuffer = nullptr;
 
 XMFLOAT3 vertices[] = {
-	{ -0.5f, -0.7f, 0.0f },
-	{ 0.0f, 0.7f, 0.0f },
-	{ 0.5f, -0.7f, 0.0f },
+	{ -0.4f, -0.7f, 0.0f },
+	{ -0.4f, 0.7f, 0.0f },
+	{ 0.4f, -0.7f, 0.0f },
+	{ 0.4f, 0.7f, 0.0f },
+};
+unsigned short indices[] = {
+	0, 1, 2,
+	2, 1, 3,
 };
 
 ID3D12RootSignature* rootSignature = nullptr;
@@ -156,6 +162,15 @@ void DxInitialize(HWND hwnd)
 	result = vertexBuffer->Map(0, nullptr, (void**)&vertexMap);
 	copy(begin(vertices), end(vertices), vertexMap);
 	vertexBuffer->Unmap(0, nullptr);
+
+	resourceDesc.Width = sizeof(indices);
+
+	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&indexBuffer));
+
+	unsigned short* indexMap = nullptr;
+	result = indexBuffer->Map(0, nullptr, (void**)&indexMap);
+	copy(begin(indices), end(indices), indexMap);
+	indexBuffer->Unmap(0, nullptr);
 
 	ID3DBlob* vsBlob = nullptr;
 	ID3DBlob* psBlob = nullptr;
@@ -325,7 +340,13 @@ void DxUpdate()
 	vbView.StrideInBytes = sizeof(vertices[0]);
 	commandList->IASetVertexBuffers(0, 1, &vbView);
 
-	commandList->DrawInstanced(3, 1, 0, 0);
+	D3D12_INDEX_BUFFER_VIEW ibView = {};
+	ibView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
+	ibView.Format = DXGI_FORMAT_R16_UINT;
+	ibView.SizeInBytes = sizeof(indices);
+	commandList->IASetIndexBuffer(&ibView);
+
+	commandList->DrawIndexedInstanced(6, 1, 0, 0, 0);
 
 	barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
