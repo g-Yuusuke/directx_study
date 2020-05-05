@@ -68,6 +68,11 @@ void GenerateTextureData()
 	result = LoadFromWICFile(L"Resource/textest.png", WIC_FLAGS_NONE, &textureMetaData, textureData);
 }
 
+size_t AlignmentedSize(size_t size, size_t alignment)
+{
+	return size + alignment - size % alignment;
+}
+
 void DxInitialize(HWND hwnd)
 {
 	ID3D12Debug* debugLayer = nullptr;
@@ -203,7 +208,8 @@ void DxInitialize(HWND hwnd)
 	GenerateTextureData();
 	auto image = textureData.GetImage(0, 0, 0);
 
-	resourceDesc.Width = image->slicePitch;
+	auto alignmentedSize = AlignmentedSize(image->rowPitch, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+	resourceDesc.Width = alignmentedSize * image->height;
 
 	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
 
@@ -230,7 +236,9 @@ void DxInitialize(HWND hwnd)
 	
 	uint8_t* imageMap = nullptr;
 	result = uploadBuffer->Map(0, nullptr, (void**)&imageMap);
-	copy_n(image->pixels, image->slicePitch, imageMap);
+	for (int y = 0; y < image->height; ++y) {
+		copy_n(image->pixels + y * image->rowPitch, alignmentedSize, imageMap + y * alignmentedSize);
+	}
 	uploadBuffer->Unmap(0, nullptr);
 
 	heapDesc = {};
@@ -419,7 +427,7 @@ void DxUpdate()
 	src.PlacedFootprint.Footprint.Width = textureMetaData.width;
 	src.PlacedFootprint.Footprint.Height = textureMetaData.height;
 	src.PlacedFootprint.Footprint.Depth = textureMetaData.depth;
-	src.PlacedFootprint.Footprint.RowPitch = image->rowPitch;
+	src.PlacedFootprint.Footprint.RowPitch = AlignmentedSize(image->rowPitch, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 	src.PlacedFootprint.Footprint.Format = image->format;
 
 	D3D12_TEXTURE_COPY_LOCATION dst = {};
