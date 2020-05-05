@@ -34,3 +34,4 @@ directx_test/DirectXTest/.vs
 *.user
 directx_test/DirectXTest/Debug
 directx_test/DirectXTest/DirectXTest/Debug
+directx_test/DirectXTest/DirectXTest/x64
