@@ -8,10 +8,13 @@
 #include<d3dcompiler.h>
 
 #include <DirectXMath.h>
+#include <DirectXTex.h>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
+
+#pragma comment(lib, "DirectXTex.lib")
 
 using namespace std;
 using namespace DirectX;
@@ -57,23 +60,14 @@ unsigned short indices[] = {
 ID3D12RootSignature* rootSignature = nullptr;
 ID3D12PipelineState* pipelineState = nullptr;
 
-struct TextureRGBA
-{
-	unsigned char R;
-	unsigned char G;
-	unsigned char B;
-	unsigned char A;
-};
-vector<TextureRGBA> textureData(TEXTURE_WIDTH * TEXTURE_HEIGHT);
+TexMetadata textureMetaData = {};
+ScratchImage textureData = {};
 
 void GenerateTextureData()
 {
-	for (auto& rgba : textureData) {
-		rgba.R = rand() % 256;
-		rgba.G = rand() % 256;
-		rgba.B = rand() % 256;
-		rgba.A = rand() % 256;
-	}
+	HRESULT result = S_OK;
+	result = CoInitializeEx(0, COINIT_MULTITHREADED);
+	result = LoadFromWICFile(L"Resource/textest.png", WIC_FLAGS_NONE, &textureMetaData, textureData);
 }
 
 void DxInitialize(HWND hwnd)
@@ -155,6 +149,10 @@ void DxInitialize(HWND hwnd)
 	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvHeaps));
 
+	D3D12_RENDER_TARGET_VIEW_DESC rtvdesc = {};
+	rtvdesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	rtvdesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+
 	DXGI_SWAP_CHAIN_DESC tempDesc = {};
 	result = swapChain->GetDesc(&tempDesc);
 	vector<ID3D12Resource*> backBuffers(tempDesc.BufferCount);
@@ -162,7 +160,7 @@ void DxInitialize(HWND hwnd)
 	UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	for (int i = 0; i < tempDesc.BufferCount; ++i) {
 		result = swapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffers[i]));
-		device->CreateRenderTargetView(backBuffers[i], nullptr, handle);
+		device->CreateRenderTargetView(backBuffers[i], &rtvdesc, handle);
 
 		handle.ptr += stride;
 	}
@@ -202,6 +200,8 @@ void DxInitialize(HWND hwnd)
 	copy(begin(indices), end(indices), indexMap);
 	indexBuffer->Unmap(0, nullptr);
 
+	GenerateTextureData();
+
 	heapProp = {};
 	heapProp.Type = D3D12_HEAP_TYPE_CUSTOM;
 	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
@@ -210,12 +210,12 @@ void DxInitialize(HWND hwnd)
 	heapProp.VisibleNodeMask = 0;
 
 	resourceDesc = {};
-	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	resourceDesc.Width = TEXTURE_WIDTH;
-	resourceDesc.Height = TEXTURE_HEIGHT;
-	resourceDesc.DepthOrArraySize = 1;
-	resourceDesc.MipLevels = 1;
-	resourceDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	resourceDesc.Dimension = static_cast<D3D12_RESOURCE_DIMENSION>(textureMetaData.dimension);
+	resourceDesc.Width = textureMetaData.width;
+	resourceDesc.Height = textureMetaData.height;
+	resourceDesc.DepthOrArraySize = textureMetaData.arraySize;
+	resourceDesc.MipLevels = textureMetaData.mipLevels;
+	resourceDesc.Format = textureMetaData.format;
 	resourceDesc.SampleDesc.Count = 1;
 	resourceDesc.SampleDesc.Quality = 0;
 	resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -223,8 +223,8 @@ void DxInitialize(HWND hwnd)
 
 	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&textureBuffer));
 
-	GenerateTextureData();
-	result = textureBuffer->WriteToSubresource(0, nullptr, textureData.data(), sizeof(TextureRGBA) * TEXTURE_WIDTH, sizeof(TextureRGBA) * textureData.size());
+	auto image = textureData.GetImage(0, 0, 0);
+	result = textureBuffer->WriteToSubresource(0, nullptr, image->pixels, image->rowPitch, image->slicePitch);
 
 	heapDesc = {};
 	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -234,7 +234,7 @@ void DxInitialize(HWND hwnd)
 	result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&textureHeaps));
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	srvDesc.Format = textureMetaData.format;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MipLevels = 1;
