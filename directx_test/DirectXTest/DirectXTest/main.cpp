@@ -22,9 +22,6 @@ using namespace DirectX;
 const unsigned int WINDOW_WIDTH = 1280;
 const unsigned int WINDOW_HEIGHT = 720;
 
-const unsigned int TEXTURE_WIDTH = 256;
-const unsigned int TEXTURE_HEIGHT = 256;
-
 ID3D12Device* device = nullptr;
 IDXGIFactory6* dxgiFactory = nullptr;
 IDXGISwapChain4* swapChain = nullptr;
@@ -39,6 +36,7 @@ UINT64 fenceValue = 0;
 
 ID3D12Resource* vertexBuffer = nullptr;
 ID3D12Resource* indexBuffer = nullptr;
+ID3D12Resource* uploadBuffer = nullptr;
 ID3D12Resource* textureBuffer = nullptr;
 
 struct Vertex
@@ -171,6 +169,8 @@ void DxInitialize(HWND hwnd)
 	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
 	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 0;
+	heapProp.VisibleNodeMask = 0;
 
 	D3D12_RESOURCE_DESC resourceDesc = {};
 	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -201,11 +201,16 @@ void DxInitialize(HWND hwnd)
 	indexBuffer->Unmap(0, nullptr);
 
 	GenerateTextureData();
+	auto image = textureData.GetImage(0, 0, 0);
+
+	resourceDesc.Width = image->slicePitch;
+
+	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
 
 	heapProp = {};
-	heapProp.Type = D3D12_HEAP_TYPE_CUSTOM;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
-	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 	heapProp.CreationNodeMask = 0;
 	heapProp.VisibleNodeMask = 0;
 
@@ -221,10 +226,12 @@ void DxInitialize(HWND hwnd)
 	resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 	resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
-	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&textureBuffer));
-
-	auto image = textureData.GetImage(0, 0, 0);
-	result = textureBuffer->WriteToSubresource(0, nullptr, image->pixels, image->rowPitch, image->slicePitch);
+	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&textureBuffer));
+	
+	uint8_t* imageMap = nullptr;
+	result = uploadBuffer->Map(0, nullptr, (void**)&imageMap);
+	copy_n(image->pixels, image->slicePitch, imageMap);
+	uploadBuffer->Unmap(0, nullptr);
 
 	heapDesc = {};
 	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -394,13 +401,45 @@ void DxInitialize(HWND hwnd)
 
 void DxUpdate()
 {
+	auto image = textureData.GetImage(0, 0, 0);
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.Transition.pResource = textureBuffer;
+	barrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+	commandList->ResourceBarrier(1, &barrierDesc);
+
+	D3D12_TEXTURE_COPY_LOCATION src = {};
+	src.pResource = uploadBuffer;
+	src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	src.PlacedFootprint.Offset = 0;
+	src.PlacedFootprint.Footprint.Width = textureMetaData.width;
+	src.PlacedFootprint.Footprint.Height = textureMetaData.height;
+	src.PlacedFootprint.Footprint.Depth = textureMetaData.depth;
+	src.PlacedFootprint.Footprint.RowPitch = image->rowPitch;
+	src.PlacedFootprint.Footprint.Format = image->format;
+
+	D3D12_TEXTURE_COPY_LOCATION dst = {};
+	dst.pResource = textureBuffer;
+	dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	dst.SubresourceIndex = 0;
+
+	commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+	barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+	barrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	commandList->ResourceBarrier(1, &barrierDesc);
+
 	UINT index = swapChain->GetCurrentBackBufferIndex();
 
 	HRESULT result = S_OK;
 	ID3D12Resource* backBuffer = nullptr;
 	result = swapChain->GetBuffer(index, IID_PPV_ARGS(&backBuffer));
 
-	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc = {};
 	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
 	barrierDesc.Transition.pResource = backBuffer;
