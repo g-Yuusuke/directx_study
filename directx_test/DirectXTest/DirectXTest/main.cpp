@@ -69,7 +69,7 @@ void GenerateTextureData()
 {
 	HRESULT result = S_OK;
 	result = CoInitializeEx(0, COINIT_MULTITHREADED);
-	result = LoadFromWICFile(L"Resource/textest.png", WIC_FLAGS_NONE, &textureMetaData, textureData);
+	result = LoadFromWICFile(L"Resource/Texture/textest.png", WIC_FLAGS_NONE, &textureMetaData, textureData);
 }
 
 // DirectX 初期化
@@ -682,7 +682,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 	HWND hwnd = CreateWindow(
 		w.lpszClassName,
-		TEXT("DX12テスト"),
+		TEXT("DX12Test"),
 		WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT,
 		CW_USEDEFAULT,
