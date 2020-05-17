@@ -29,7 +29,7 @@ ID3D12CommandAllocator* commandAllocator = nullptr;
 ID3D12GraphicsCommandList* commandList = nullptr;
 ID3D12CommandQueue* commandQueue = nullptr;
 ID3D12DescriptorHeap* rtvHeaps = nullptr;
-ID3D12DescriptorHeap* textureHeaps = nullptr;
+ID3D12DescriptorHeap* basicHeaps = nullptr;
 
 ID3D12Fence* fence = nullptr;
 UINT64 fenceValue = 0;
@@ -38,6 +38,7 @@ ID3D12Resource* vertexBuffer = nullptr;
 ID3D12Resource* indexBuffer = nullptr;
 ID3D12Resource* uploadBuffer = nullptr;
 ID3D12Resource* textureBuffer = nullptr;
+ID3D12Resource* constantBuffer = nullptr;
 
 struct Vertex
 {
@@ -45,15 +46,17 @@ struct Vertex
 	XMFLOAT2 uv;
 };
 Vertex vertices[] = {
-	{ { -0.4f, -0.7f, 0.0f }, { 0.0f, 1.0f } },
-	{ { -0.4f, 0.7f, 0.0f }, { 0.0f, 0.0f } },
-	{ { 0.4f, -0.7f, 0.0f }, { 1.0f, 1.0f } },
-	{ { 0.4f, 0.7f, 0.0f }, { 1.0f, 0.0f } },
+	{ { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
+	{ { -1.0f, 1.0f, 0.0f }, { 0.0f, 0.0f } },
+	{ { 1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
+	{ { 1.0f, 1.0f, 0.0f }, { 1.0f, 0.0f } },
 };
 unsigned short indices[] = {
 	0, 1, 2,
 	2, 1, 3,
 };
+
+float angle = XM_PIDIV4;
 
 ID3D12RootSignature* rootSignature = nullptr;
 ID3D12PipelineState* pipelineState = nullptr;
@@ -215,7 +218,7 @@ void DxInitialize(HWND hwnd)
 
 	heapProp = {};
 	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 	heapProp.CreationNodeMask = 0;
 	heapProp.VisibleNodeMask = 0;
@@ -241,19 +244,49 @@ void DxInitialize(HWND hwnd)
 	}
 	uploadBuffer->Unmap(0, nullptr);
 
+	heapProp = {};
+	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 0;
+	heapProp.VisibleNodeMask = 0;
+
+	resourceDesc = {};
+	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	resourceDesc.Width = AlignmentedSize(sizeof(XMMATRIX), 256);
+	resourceDesc.Height = 1;
+	resourceDesc.DepthOrArraySize = 1;
+	resourceDesc.MipLevels = 1;
+	resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+	resourceDesc.SampleDesc.Count = 1;
+	resourceDesc.SampleDesc.Quality = 0;
+	resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&constantBuffer));
+
 	heapDesc = {};
 	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	heapDesc.NodeMask = 0;
-	heapDesc.NumDescriptors = 1;
+	heapDesc.NumDescriptors = 2;
 	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-	result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&textureHeaps));
+	result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&basicHeaps));
+
+	handle = basicHeaps->GetCPUDescriptorHandleForHeapStart();
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Format = textureMetaData.format;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MipLevels = 1;
-	device->CreateShaderResourceView(textureBuffer, &srvDesc, textureHeaps->GetCPUDescriptorHandleForHeapStart());
+	device->CreateShaderResourceView(textureBuffer, &srvDesc, handle);
+
+	handle.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+	cbvDesc.BufferLocation = constantBuffer->GetGPUVirtualAddress();
+	cbvDesc.SizeInBytes = constantBuffer->GetDesc().Width;
+	device->CreateConstantBufferView(&cbvDesc, handle);
 
 	ID3DBlob* vsBlob = nullptr;
 	ID3DBlob* psBlob = nullptr;
@@ -320,16 +353,21 @@ void DxInitialize(HWND hwnd)
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineStateDesc = {};
 
+	D3D12_DESCRIPTOR_RANGE descRange[2] = {};
+	descRange[0].NumDescriptors = 1;
+	descRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	descRange[0].BaseShaderRegister = 0;
+	descRange[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+	descRange[1].NumDescriptors = 1;
+	descRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+	descRange[1].BaseShaderRegister = 0;
+	descRange[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
 	D3D12_ROOT_PARAMETER rootParam = {};
 	rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-	rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-	D3D12_DESCRIPTOR_RANGE descRange = {};
-	descRange.NumDescriptors = 1;
-	descRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	descRange.BaseShaderRegister = 0;
-	descRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-	rootParam.DescriptorTable.pDescriptorRanges = &descRange;
-	rootParam.DescriptorTable.NumDescriptorRanges = 1;
+	rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	rootParam.DescriptorTable.pDescriptorRanges = descRange;
+	rootParam.DescriptorTable.NumDescriptorRanges = 2;
 
 	D3D12_STATIC_SAMPLER_DESC samplerDesc = {};
 	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -409,6 +447,22 @@ void DxInitialize(HWND hwnd)
 
 void DxUpdate()
 {
+	HRESULT result = S_OK;
+
+	XMMATRIX matrix = XMMatrixIdentity();
+	angle += 0.1f;
+	matrix *= XMMatrixRotationY(angle);
+	XMFLOAT3 eye(0.0f, 0.0f, -5.0f);
+	XMFLOAT3 focus(0.0f, 0.0f, 0.0f);
+	XMFLOAT3 up(0.0f, 1.0f, 0.0f);
+	matrix *= XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&focus), XMLoadFloat3(&up));
+	matrix *= XMMatrixPerspectiveFovLH(XM_PIDIV2, static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT), 1.0f, 10.0f);
+
+	XMMATRIX* matrixMap = nullptr;
+	result = constantBuffer->Map(0, NULL, (void**)&matrixMap);
+	*matrixMap = matrix;
+	constantBuffer->Unmap(0, nullptr);
+
 	auto image = textureData.GetImage(0, 0, 0);
 
 	D3D12_RESOURCE_BARRIER barrierDesc = {};
@@ -443,7 +497,6 @@ void DxUpdate()
 
 	UINT index = swapChain->GetCurrentBackBufferIndex();
 
-	HRESULT result = S_OK;
 	ID3D12Resource* backBuffer = nullptr;
 	result = swapChain->GetBuffer(index, IID_PPV_ARGS(&backBuffer));
 
@@ -460,9 +513,9 @@ void DxUpdate()
 
 	commandList->SetGraphicsRootSignature(rootSignature);
 
-	commandList->SetDescriptorHeaps(1, &textureHeaps);
+	commandList->SetDescriptorHeaps(1, &basicHeaps);
 
-	commandList->SetGraphicsRootDescriptorTable(0, textureHeaps->GetGPUDescriptorHandleForHeapStart());
+	commandList->SetGraphicsRootDescriptorTable(0, basicHeaps->GetGPUDescriptorHandleForHeapStart());
 
 	UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	D3D12_CPU_DESCRIPTOR_HANDLE handle = rtvHeaps->GetCPUDescriptorHandleForHeapStart();
