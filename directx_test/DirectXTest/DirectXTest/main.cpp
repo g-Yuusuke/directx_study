@@ -19,8 +19,8 @@
 using namespace std;
 using namespace DirectX;
 
-const unsigned int WINDOW_WIDTH = 1280;
-const unsigned int WINDOW_HEIGHT = 720;
+constexpr unsigned int WINDOW_WIDTH = 1280;
+constexpr unsigned int WINDOW_HEIGHT = 720;
 
 ID3D12Device* device = nullptr;
 IDXGIFactory6* dxgiFactory = nullptr;
@@ -64,12 +64,59 @@ ID3D12PipelineState* pipelineState = nullptr;
 TexMetadata textureMetaData = {};
 ScratchImage textureData = {};
 
+struct PMDHeader
+{
+	float version;
+	char model_name[20];
+	char comment[256];
+};
+
+struct PMDVertex
+{
+	XMFLOAT3 pos;
+	XMFLOAT3 normal;
+	XMFLOAT2 uv;
+	unsigned short bone_no[2];
+	unsigned char bone_weight;
+	unsigned char edge_flag;
+};
+constexpr size_t PMD_VERTEX_SIZE = 38;
+
+PMDHeader modelHeader = {};
+vector<PMDVertex> modelVertices;
+vector<unsigned short> modelIndices;
+
 // テクスチャ読み込み
 void GenerateTextureData()
 {
 	HRESULT result = S_OK;
 	result = CoInitializeEx(0, COINIT_MULTITHREADED);
 	result = LoadFromWICFile(L"Resource/Texture/textest.png", WIC_FLAGS_NONE, &textureMetaData, textureData);
+}
+
+// モデル読み込み
+void GenerateModelData()
+{
+	char signature[3] = {};
+	FILE* fp = nullptr;
+	errno_t error = fopen_s(&fp, "Resource/Model/初音ミク.pmd", "rb");
+
+	fread(signature, sizeof(signature), 1, fp);
+	fread(&modelHeader, sizeof(modelHeader), 1, fp);
+
+	unsigned int vertexNum;
+	fread(&vertexNum, sizeof(vertexNum), 1, fp);
+
+	modelVertices.resize(vertexNum);
+	fread(modelVertices.data(), PMD_VERTEX_SIZE * modelVertices.size(), 1, fp);
+
+	unsigned int indexNum;
+	fread(&indexNum, sizeof(indexNum), 1, fp);
+
+	modelIndices.resize(indexNum);
+	fread(modelIndices.data(), sizeof(modelIndices[0]) * modelIndices.size(), 1, fp);
+	
+	fclose(fp);
 }
 
 // DirectX 初期化
@@ -184,6 +231,8 @@ void DxInitialize(HWND hwnd)
 	// フェンスの準備
 	result = device->CreateFence(fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
 
+	GenerateModelData();
+
 	// 頂点バッファー作成
 	D3D12_HEAP_PROPERTIES heapProp = {};
 	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -194,7 +243,7 @@ void DxInitialize(HWND hwnd)
 
 	D3D12_RESOURCE_DESC resourceDesc = {};
 	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	resourceDesc.Width = sizeof(vertices);
+	resourceDesc.Width = PMD_VERTEX_SIZE * modelVertices.size();
 	resourceDesc.Height = 1;
 	resourceDesc.DepthOrArraySize = 1;
 	resourceDesc.MipLevels = 1;
@@ -207,20 +256,20 @@ void DxInitialize(HWND hwnd)
 	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&vertexBuffer));
 
 	// マップして頂点情報を書き込み
-	Vertex* vertexMap = nullptr;
+	PMDVertex* vertexMap = nullptr;
 	result = vertexBuffer->Map(0, nullptr, (void**)&vertexMap);
-	copy(begin(vertices), end(vertices), vertexMap);
+	copy(begin(modelVertices), end(modelVertices), vertexMap);
 	vertexBuffer->Unmap(0, nullptr);
 
 	// 同様にインデックスバッファーを作成
-	resourceDesc.Width = sizeof(indices);
+	resourceDesc.Width = sizeof(modelIndices[0]) * modelIndices.size();
 
 	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&indexBuffer));
 
 	// マップしてインデックス情報を書き込み
 	unsigned short* indexMap = nullptr;
 	result = indexBuffer->Map(0, nullptr, (void**)&indexMap);
-	copy(begin(indices), end(indices), indexMap);
+	copy(begin(modelIndices), end(modelIndices), indexMap);
 	indexBuffer->Unmap(0, nullptr);
 
 	// テクスチャ読み込み
@@ -361,7 +410,7 @@ void DxInitialize(HWND hwnd)
 	}
 
 	// 頂点レイアウトの設定
-	// 頂点ごとに座標とUV座標が渡される
+	// 頂点ごとにPMDに合わせた情報を渡す
 	D3D12_INPUT_ELEMENT_DESC posLayout = {};
 	posLayout.SemanticName = "POSITION";
 	posLayout.SemanticIndex = 0;
@@ -370,7 +419,16 @@ void DxInitialize(HWND hwnd)
 	posLayout.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
 	posLayout.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
 	posLayout.InstanceDataStepRate = 0;
-	
+
+	D3D12_INPUT_ELEMENT_DESC normalLayout = {};
+	normalLayout.SemanticName = "NORMAL";
+	normalLayout.SemanticIndex = 0;
+	normalLayout.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+	normalLayout.InputSlot = 0;
+	normalLayout.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
+	normalLayout.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+	normalLayout.InstanceDataStepRate = 0;
+
 	D3D12_INPUT_ELEMENT_DESC uvLayout = {};
 	uvLayout.SemanticName = "TEXCOORD";
 	uvLayout.SemanticIndex = 0;
@@ -380,7 +438,41 @@ void DxInitialize(HWND hwnd)
 	uvLayout.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
 	uvLayout.InstanceDataStepRate = 0;
 
-	D3D12_INPUT_ELEMENT_DESC inputLayouts[] = { posLayout, uvLayout };
+	D3D12_INPUT_ELEMENT_DESC boneNoLayout = {};
+	boneNoLayout.SemanticName = "BONE_NO";
+	boneNoLayout.SemanticIndex = 0;
+	boneNoLayout.Format = DXGI_FORMAT_R16G16B16A16_UINT;
+	boneNoLayout.InputSlot = 0;
+	boneNoLayout.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
+	boneNoLayout.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+	boneNoLayout.InstanceDataStepRate = 0;
+
+	D3D12_INPUT_ELEMENT_DESC weightLayout = {};
+	weightLayout.SemanticName = "WEIGHT";
+	weightLayout.SemanticIndex = 0;
+	weightLayout.Format = DXGI_FORMAT_R8_UINT;
+	weightLayout.InputSlot = 0;
+	weightLayout.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
+	weightLayout.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+	weightLayout.InstanceDataStepRate = 0;
+
+	D3D12_INPUT_ELEMENT_DESC edgeFlagLayout = {};
+	edgeFlagLayout.SemanticName = "EDGE_FLAG";
+	edgeFlagLayout.SemanticIndex = 0;
+	edgeFlagLayout.Format = DXGI_FORMAT_R8_UINT;
+	edgeFlagLayout.InputSlot = 0;
+	edgeFlagLayout.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
+	edgeFlagLayout.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+	edgeFlagLayout.InstanceDataStepRate = 0;
+
+	D3D12_INPUT_ELEMENT_DESC inputLayouts[] = {
+		posLayout,
+		normalLayout,
+		uvLayout,
+		boneNoLayout,
+		weightLayout,
+		edgeFlagLayout,
+	};
 
 	// グラフィックパイプラインステートの作成
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineStateDesc = {};
@@ -504,12 +596,12 @@ void DxUpdate()
 	angle += 0.1f;
 	matrix *= XMMatrixRotationY(angle);
 	// ビュー行列の計算
-	XMFLOAT3 eye(0.0f, 0.0f, -5.0f);
-	XMFLOAT3 focus(0.0f, 0.0f, 0.0f);
+	XMFLOAT3 eye(0.0f, 10.0f, -15.0f);
+	XMFLOAT3 focus(0.0f, 10.0f, 0.0f);
 	XMFLOAT3 up(0.0f, 1.0f, 0.0f);
 	matrix *= XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&focus), XMLoadFloat3(&up));
 	// プロジェクション行列の計算
-	matrix *= XMMatrixPerspectiveFovLH(XM_PIDIV2, static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT), 1.0f, 10.0f);
+	matrix *= XMMatrixPerspectiveFovLH(XM_PIDIV2, static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT), 1.0f, 100.0f);
 
 	// マップして定数バッファーに行列を書き込み
 	XMMATRIX* matrixMap = nullptr;
@@ -616,19 +708,19 @@ void DxUpdate()
 	// 頂点バッファービューの設定
 	D3D12_VERTEX_BUFFER_VIEW vbView = {};
 	vbView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
-	vbView.SizeInBytes = sizeof(vertices);
-	vbView.StrideInBytes = sizeof(vertices[0]);
+	vbView.SizeInBytes = PMD_VERTEX_SIZE * modelVertices.size();
+	vbView.StrideInBytes = PMD_VERTEX_SIZE;
 	commandList->IASetVertexBuffers(0, 1, &vbView);
 
 	// インデックスバッファービューの設定
 	D3D12_INDEX_BUFFER_VIEW ibView = {};
 	ibView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
 	ibView.Format = DXGI_FORMAT_R16_UINT;
-	ibView.SizeInBytes = sizeof(indices);
+	ibView.SizeInBytes = sizeof(modelIndices[0]) * modelIndices.size();
 	commandList->IASetIndexBuffer(&ibView);
 
 	// 描画
-	commandList->DrawIndexedInstanced(6, 1, 0, 0, 0);
+	commandList->DrawIndexedInstanced(modelIndices.size(), 1, 0, 0, 0);
 
 	// 描画したら画面表示バッファーへ切り替え
 	barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -682,7 +774,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 	HWND hwnd = CreateWindow(
 		w.lpszClassName,
-		TEXT("DX12Test"),
+		TEXT("DX12テスト"),
 		WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT,
 		CW_USEDEFAULT,
