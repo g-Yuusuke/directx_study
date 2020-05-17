@@ -9,8 +9,9 @@ VSOutput BasicVS(
 	min16uint edge_flag : EDGE_FLAG)
 {
 	VSOutput output;
-	output.svpos = mul(mat,pos);
-	output.normal = normal;
+	output.svpos = mul(mul(view_proj, world), pos);
+	normal.w = 0;
+	output.normal = mul(world, normal);
 	output.uv = uv;
 	return output;
 };

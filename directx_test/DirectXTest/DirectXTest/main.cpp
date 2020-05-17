@@ -30,6 +30,7 @@ ID3D12GraphicsCommandList* commandList = nullptr;
 ID3D12CommandQueue* commandQueue = nullptr;
 ID3D12DescriptorHeap* rtvHeaps = nullptr;
 ID3D12DescriptorHeap* basicHeaps = nullptr;
+ID3D12DescriptorHeap* dsvHeaps = nullptr;
 
 ID3D12Fence* fence = nullptr;
 UINT64 fenceValue = 0;
@@ -39,6 +40,7 @@ ID3D12Resource* indexBuffer = nullptr;
 ID3D12Resource* uploadBuffer = nullptr;
 ID3D12Resource* textureBuffer = nullptr;
 ID3D12Resource* constantBuffer = nullptr;
+ID3D12Resource* depthBuffer = nullptr;
 
 struct Vertex
 {
@@ -56,6 +58,11 @@ unsigned short indices[] = {
 	2, 1, 3,
 };
 
+struct MatrixSet
+{
+	XMMATRIX world;
+	XMMATRIX view_proj;
+};
 float angle = XM_PIDIV4;
 
 ID3D12RootSignature* rootSignature = nullptr;
@@ -231,6 +238,7 @@ void DxInitialize(HWND hwnd)
 	// フェンスの準備
 	result = device->CreateFence(fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
 
+	// モデル読み込み
 	GenerateModelData();
 
 	// 頂点バッファー作成
@@ -313,6 +321,14 @@ void DxInitialize(HWND hwnd)
 	}
 	uploadBuffer->Unmap(0, nullptr);
 
+	// ビュー行列とプロジェクション行列の準備
+	XMMATRIX matrix = XMMatrixIdentity();
+	XMFLOAT3 eye(0.0f, 10.0f, -15.0f);
+	XMFLOAT3 focus(0.0f, 10.0f, 0.0f);
+	XMFLOAT3 up(0.0f, 1.0f, 0.0f);
+	matrix *= XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&focus), XMLoadFloat3(&up));
+	matrix *= XMMatrixPerspectiveFovLH(XM_PIDIV2, static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT), 1.0f, 100.0f);
+
 	// 定数バッファーを作成
 	// 座標変換用の行列を転送するために使用
 	heapProp = {};
@@ -324,7 +340,7 @@ void DxInitialize(HWND hwnd)
 
 	resourceDesc = {};
 	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	resourceDesc.Width = (sizeof(XMMATRIX) + 0xFF) & ~0xFF;
+	resourceDesc.Width = (sizeof(MatrixSet) + 0xFF) & ~0xFF;
 	resourceDesc.Height = 1;
 	resourceDesc.DepthOrArraySize = 1;
 	resourceDesc.MipLevels = 1;
@@ -335,6 +351,11 @@ void DxInitialize(HWND hwnd)
 	resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
 	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&constantBuffer));
+
+	MatrixSet* matrixMap = nullptr;
+	result = constantBuffer->Map(0, nullptr, (void**)&matrixMap);
+	matrixMap->view_proj = matrix;
+	constantBuffer->Unmap(0, nullptr);
 
 	// シェーダーリソースビューと定数バッファービューのためのディスクリプタヒープを作成
 	heapDesc = {};
@@ -363,6 +384,48 @@ void DxInitialize(HWND hwnd)
 	cbvDesc.BufferLocation = constantBuffer->GetGPUVirtualAddress();
 	cbvDesc.SizeInBytes = constantBuffer->GetDesc().Width;
 	device->CreateConstantBufferView(&cbvDesc, handle);
+
+	// 深度バッファーを作成
+	heapProp = {};
+	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 0;
+	heapProp.VisibleNodeMask = 0;
+
+	resourceDesc = {};
+	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	resourceDesc.Width = WINDOW_WIDTH;
+	resourceDesc.Height = WINDOW_HEIGHT;
+	resourceDesc.DepthOrArraySize = 1;
+	resourceDesc.MipLevels = 1;
+	resourceDesc.Format = DXGI_FORMAT_D32_FLOAT;
+	resourceDesc.SampleDesc.Count = 1;
+	resourceDesc.SampleDesc.Quality = 0;
+	resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+	resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+	// 深度バッファのクリアバリューを設定
+	D3D12_CLEAR_VALUE clearValue = {};
+	clearValue.DepthStencil.Depth = 1.0f;
+	clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+
+	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue, IID_PPV_ARGS(&depthBuffer));
+
+	// ディスクリプタヒープ上にデプスステンシルビューを作成
+	// ディスクリプタヒープは新しいものを用意
+	heapDesc = {};
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+	heapDesc.NodeMask = 0;
+	heapDesc.NumDescriptors = 1;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvHeaps));
+
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+	dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+	device->CreateDepthStencilView(depthBuffer, &dsvDesc, dsvHeaps->GetCPUDescriptorHandleForHeapStart());
 
 	ID3DBlob* vsBlob = nullptr;
 	ID3DBlob* psBlob = nullptr;
@@ -564,8 +627,14 @@ void DxInitialize(HWND hwnd)
 	pipelineStateDesc.BlendState.RenderTarget[0] = blendDesc;
 
 	// 深度バッファー、ステンシルバッファーの設定
-	pipelineStateDesc.DepthStencilState.DepthEnable = false;
+	// 深度バッファーは有効、深度が小さい方を書き込む
+	pipelineStateDesc.DepthStencilState.DepthEnable = true;
+	pipelineStateDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	pipelineStateDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+	// ステンシルバッファーは無効
 	pipelineStateDesc.DepthStencilState.StencilEnable = false;
+
+	pipelineStateDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
 	// 入力レイアウトの設定
 	pipelineStateDesc.InputLayout.pInputElementDescs = inputLayouts;
@@ -595,18 +664,11 @@ void DxUpdate()
 	// ワールド行列の角度を更新して画像を回転させる
 	angle += 0.1f;
 	matrix *= XMMatrixRotationY(angle);
-	// ビュー行列の計算
-	XMFLOAT3 eye(0.0f, 10.0f, -15.0f);
-	XMFLOAT3 focus(0.0f, 10.0f, 0.0f);
-	XMFLOAT3 up(0.0f, 1.0f, 0.0f);
-	matrix *= XMMatrixLookAtLH(XMLoadFloat3(&eye), XMLoadFloat3(&focus), XMLoadFloat3(&up));
-	// プロジェクション行列の計算
-	matrix *= XMMatrixPerspectiveFovLH(XM_PIDIV2, static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT), 1.0f, 100.0f);
 
 	// マップして定数バッファーに行列を書き込み
-	XMMATRIX* matrixMap = nullptr;
+	MatrixSet* matrixMap = nullptr;
 	result = constantBuffer->Map(0, NULL, (void**)&matrixMap);
-	*matrixMap = matrix;
+	matrixMap->world = matrix;
 	constantBuffer->Unmap(0, nullptr);
 
 	auto image = textureData.GetImage(0, 0, 0);
@@ -675,9 +737,11 @@ void DxUpdate()
 
 	// レンダーターゲットの設定
 	UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-	D3D12_CPU_DESCRIPTOR_HANDLE handle = rtvHeaps->GetCPUDescriptorHandleForHeapStart();
-	handle.ptr += index * stride;
-	commandList->OMSetRenderTargets(1, &handle, true, nullptr);
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeaps->GetCPUDescriptorHandleForHeapStart();
+	rtvHandle.ptr += index * stride;
+	// 深度バッファーも紐付ける
+	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeaps->GetCPUDescriptorHandleForHeapStart();
+	commandList->OMSetRenderTargets(1, &rtvHandle, true, &dsvHandle);
 
 	// ビューポートの設定
 	D3D12_VIEWPORT viewport = {};
@@ -699,7 +763,10 @@ void DxUpdate()
 
 	// 画面のクリア
 	float clearColor[] = { 1.0f, 0.0f, 0.0f, 1.0f };
-	commandList->ClearRenderTargetView(handle, clearColor, 0, nullptr);
+	commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+	// 深度バッファのクリア
+	commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	// プリミティブトポロジーの設定
 	// トライアングルリストを使用
