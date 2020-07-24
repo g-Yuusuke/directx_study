@@ -12,3 +12,10 @@ cbuffer cbuff0 :register(b0)
 	matrix world;
 	matrix view_proj;
 };
+
+cbuffer mat :register(b1)
+{
+	float4 diffuse;
+	float4 specular;
+	float3 ambient;
+};

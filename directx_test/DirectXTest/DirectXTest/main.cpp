@@ -31,6 +31,7 @@ ID3D12CommandQueue* commandQueue = nullptr;
 ID3D12DescriptorHeap* rtvHeaps = nullptr;
 ID3D12DescriptorHeap* basicHeaps = nullptr;
 ID3D12DescriptorHeap* dsvHeaps = nullptr;
+ID3D12DescriptorHeap* materialHeaps = nullptr;
 
 ID3D12Fence* fence = nullptr;
 UINT64 fenceValue = 0;
@@ -39,6 +40,7 @@ ID3D12Resource* vertexBuffer = nullptr;
 ID3D12Resource* indexBuffer = nullptr;
 ID3D12Resource* uploadBuffer = nullptr;
 ID3D12Resource* textureBuffer = nullptr;
+ID3D12Resource* materialBuffer = nullptr;
 ID3D12Resource* constantBuffer = nullptr;
 ID3D12Resource* depthBuffer = nullptr;
 
@@ -89,9 +91,50 @@ struct PMDVertex
 };
 constexpr size_t PMD_VERTEX_SIZE = 38;
 
+#pragma pack(1)
+struct PMDMaterial
+{
+	XMFLOAT3 diffuse;
+	float alpha;
+	float specularity;
+	XMFLOAT3 specular;
+	XMFLOAT3 ambient;
+	unsigned char toonIndex;
+	unsigned char edgeFlag;
+	unsigned int indicesNum;
+	char textureFilePath[20];
+};
+#pragma pack()
+
 PMDHeader modelHeader = {};
 vector<PMDVertex> modelVertices;
 vector<unsigned short> modelIndices;
+vector<PMDMaterial> modelMaterials;
+
+struct ShaderMaterial
+{
+	XMFLOAT3 diffuse;
+	float alpha;
+	XMFLOAT3 specular;
+	float specularity;
+	XMFLOAT3 ambient;
+};
+
+struct AdditionalMaterial
+{
+	string texturePath;
+	int toonIndex;
+	bool edgeFlag;
+};
+
+struct Material
+{
+	unsigned int indicesNum;
+	ShaderMaterial shaderMaterial;
+	AdditionalMaterial additionalMaterial;
+};
+
+vector<Material> materials;
 
 // テクスチャ読み込み
 void GenerateTextureData()
@@ -122,6 +165,23 @@ void GenerateModelData()
 
 	modelIndices.resize(indexNum);
 	fread(modelIndices.data(), sizeof(modelIndices[0]) * modelIndices.size(), 1, fp);
+
+	unsigned int materialNum;
+	fread(&materialNum, sizeof(materialNum), 1, fp);
+
+	modelMaterials.resize(materialNum);
+	fread(modelMaterials.data(), sizeof(PMDMaterial) * modelMaterials.size(), 1, fp);
+
+	materials.resize(modelMaterials.size());
+	for (int i = 0; i < modelMaterials.size(); ++i)
+	{
+		materials[i].indicesNum = modelMaterials[i].indicesNum;
+		materials[i].shaderMaterial.diffuse = modelMaterials[i].diffuse;
+		materials[i].shaderMaterial.alpha = modelMaterials[i].alpha;
+		materials[i].shaderMaterial.specular = modelMaterials[i].specular;
+		materials[i].shaderMaterial.specularity = modelMaterials[i].specularity;
+		materials[i].shaderMaterial.ambient = modelMaterials[i].ambient;
+	}
 	
 	fclose(fp);
 }
@@ -321,6 +381,40 @@ void DxInitialize(HWND hwnd)
 	}
 	uploadBuffer->Unmap(0, nullptr);
 
+	// マテリアル用バッファーを作成
+	heapProp = {};
+	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 0;
+	heapProp.VisibleNodeMask = 0;
+
+	auto materialBufferSize = (sizeof(ShaderMaterial) + 0xFF) & ~0xFF;
+
+	resourceDesc = {};
+	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	resourceDesc.Width = materialBufferSize * materials.size();
+	resourceDesc.Height = 1;
+	resourceDesc.DepthOrArraySize = 1;
+	resourceDesc.MipLevels = 1;
+	resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+	resourceDesc.SampleDesc.Count = 1;
+	resourceDesc.SampleDesc.Quality = 0;
+	resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	result = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&materialBuffer));
+
+	// マップしてマテリアル情報を書き込み
+	char* materialMap = nullptr;
+	result = materialBuffer->Map(0, nullptr, (void**)&materialMap);
+	for (auto& m : materials)
+	{
+		*((ShaderMaterial*)materialMap) = m.shaderMaterial;
+		materialMap += materialBufferSize;
+	}
+	materialBuffer->Unmap(0, nullptr);
+
 	// ビュー行列とプロジェクション行列の準備
 	XMMATRIX matrix = XMMatrixIdentity();
 	XMFLOAT3 eye(0.0f, 10.0f, -15.0f);
@@ -384,6 +478,24 @@ void DxInitialize(HWND hwnd)
 	cbvDesc.BufferLocation = constantBuffer->GetGPUVirtualAddress();
 	cbvDesc.SizeInBytes = constantBuffer->GetDesc().Width;
 	device->CreateConstantBufferView(&cbvDesc, handle);
+
+	heapDesc = {};
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.NodeMask = 0;
+	heapDesc.NumDescriptors = materials.size();
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&materialHeaps));
+
+	cbvDesc = {};
+	cbvDesc.BufferLocation = materialBuffer->GetGPUVirtualAddress();
+	cbvDesc.SizeInBytes = materialBufferSize;
+	handle = materialHeaps->GetCPUDescriptorHandleForHeapStart();
+	for (int i = 0; i < materials.size(); ++i)
+	{
+		device->CreateConstantBufferView(&cbvDesc, handle);
+		handle.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		cbvDesc.BufferLocation += materialBufferSize;
+	}
 
 	// 深度バッファーを作成
 	heapProp = {};
@@ -542,7 +654,7 @@ void DxInitialize(HWND hwnd)
 
 	// ディスクリプタレンジの指定
 	// シェーダーリソースビューと定数バッファービューを使用
-	D3D12_DESCRIPTOR_RANGE descRange[2] = {};
+	D3D12_DESCRIPTOR_RANGE descRange[3] = {};
 	descRange[0].NumDescriptors = 1;
 	descRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	descRange[0].BaseShaderRegister = 0;
@@ -551,14 +663,22 @@ void DxInitialize(HWND hwnd)
 	descRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
 	descRange[1].BaseShaderRegister = 0;
 	descRange[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+	descRange[2].NumDescriptors = 1;
+	descRange[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+	descRange[2].BaseShaderRegister = 1;
+	descRange[2].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
 	// ルートパラメーターの設定
 	// ディスクリプタテーブルとして使用
-	D3D12_ROOT_PARAMETER rootParam = {};
-	rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-	rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-	rootParam.DescriptorTable.pDescriptorRanges = descRange;
-	rootParam.DescriptorTable.NumDescriptorRanges = 2;
+	D3D12_ROOT_PARAMETER rootParam[2] = {};
+	rootParam[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	rootParam[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	rootParam[0].DescriptorTable.pDescriptorRanges = &descRange[0];
+	rootParam[0].DescriptorTable.NumDescriptorRanges = 2;
+	rootParam[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	rootParam[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	rootParam[1].DescriptorTable.pDescriptorRanges = &descRange[2];
+	rootParam[1].DescriptorTable.NumDescriptorRanges = 1;
 
 	// サンプラーの設定
 	D3D12_STATIC_SAMPLER_DESC samplerDesc = {};
@@ -576,8 +696,8 @@ void DxInitialize(HWND hwnd)
 	// ルートパラメーターとサンプラーを指定する
 	D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
 	rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-	rootSigDesc.pParameters = &rootParam;
-	rootSigDesc.NumParameters = 1;
+	rootSigDesc.pParameters = rootParam;
+	rootSigDesc.NumParameters = 2;
 	rootSigDesc.pStaticSamplers = &samplerDesc;
 	rootSigDesc.NumStaticSamplers = 1;
 	
@@ -726,15 +846,6 @@ void DxUpdate()
 	// グラフィックスパイプラインステートの設定
 	commandList->SetPipelineState(pipelineState);
 
-	// ルートシグネチャの設定
-	commandList->SetGraphicsRootSignature(rootSignature);
-
-	// ディスクリプタヒープの設定
-	commandList->SetDescriptorHeaps(1, &basicHeaps);
-
-	// ディスクリプタテーブルとしてのルートパラメーターとディスクリプタヒープの紐付け
-	commandList->SetGraphicsRootDescriptorTable(0, basicHeaps->GetGPUDescriptorHandleForHeapStart());
-
 	// レンダーターゲットの設定
 	UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeaps->GetCPUDescriptorHandleForHeapStart();
@@ -786,8 +897,29 @@ void DxUpdate()
 	ibView.SizeInBytes = sizeof(modelIndices[0]) * modelIndices.size();
 	commandList->IASetIndexBuffer(&ibView);
 
-	// 描画
-	commandList->DrawIndexedInstanced(modelIndices.size(), 1, 0, 0, 0);
+	// ルートシグネチャの設定
+	commandList->SetGraphicsRootSignature(rootSignature);
+
+	// ディスクリプタヒープの設定
+	commandList->SetDescriptorHeaps(1, &basicHeaps);
+	commandList->SetDescriptorHeaps(1, &materialHeaps);
+
+	// ディスクリプタテーブルとしてのルートパラメーターとディスクリプタヒープの紐付け
+	commandList->SetGraphicsRootDescriptorTable(0, basicHeaps->GetGPUDescriptorHandleForHeapStart());
+
+	// マテリアルごとにディスクリプタヒープとルートパラメーターを紐付けて描画
+	auto materialHandle = materialHeaps->GetGPUDescriptorHandleForHeapStart();
+	unsigned int indicesOffset = 0;
+	for (auto& m : materials)
+	{
+		commandList->SetGraphicsRootDescriptorTable(1, materialHandle);
+
+		// 描画
+		commandList->DrawIndexedInstanced(m.indicesNum, 1, indicesOffset, 0, 0);
+
+		materialHandle.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		indicesOffset += m.indicesNum;
+	}
 
 	// 描画したら画面表示バッファーへ切り替え
 	barrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
